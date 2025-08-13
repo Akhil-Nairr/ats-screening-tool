@@ -24,7 +24,10 @@ def read_txt(file) -> str:
 def _read_pdf_with_pdfminer(file) -> str:
     """Primary PDF extractor: pdfminer.six"""
     try:
-        from pdfminer.high_level import extract_text
+        from pdfminer_high_level import extract_text  # safety alias if some envs
+    except Exception:
+        from pdfminer.high_level import extract_text  # normal import
+    try:
         pos = file.tell()
         try:
             file.seek(0)
@@ -42,6 +45,7 @@ def _read_pdf_with_pypdf2(file) -> str:
         import PyPDF2
         pos = file.tell()
         try:
+            file.seek(0)
             reader = PyPDF2.PdfReader(file)
             out = []
             for page in reader.pages:
@@ -157,7 +161,7 @@ def ats_readability_score(text: str) -> int:
     if re.search(r"table|columns|graphic|image", text, re.I):
         score -= 10
     # Penalize too many special characters
-    specials = len(re.findall(r"[^a-zA-Z0-9\s.,;:()&/\-+']", text))
+    specials = len(re.findall(r"[^a-zA-Z0-9\s.,;:()&/\\\-+']", text))
     if specials > 50:
         score -= 10
     wc = len(text.split())
@@ -220,6 +224,7 @@ def parse_blacklist_input(user_input: str) -> set:
 
 
 def extract_company_blacklist(jd_text: str, user_blacklist: Optional[set] = None) -> set:
+    # detect capitalized brand/company words in header and domains anywhere
     head = jd_text[:600]
     caps = re.findall(r'\b[A-Z][A-Za-z0-9&.-]{2,}\b', head)
     domains = re.findall(r'\b[a-z0-9.-]+\.(?:com|io|ai|net|org)\b', jd_text, re.I)
@@ -429,14 +434,16 @@ if run:
 
         # Optional: show JD terms used
         if show_jd_terms:
-            with st.expander("JD terms used for tailoring/scoring"):
-                st.write(", ".join(jd_terms_global) or "—")
+            st.markdown("**JD terms used for tailoring/scoring**")
+            st.write(", ".join(jd_terms_global) or "—")
+            st.markdown("---")
 
         # Optional: TF-IDF debug for JD
         if show_tfidf_debug:
-            with st.expander("TF-IDF top terms — JD"):
-                jd_terms_scores = top_terms(jd_text_n, n=tfidf_topn)
-                st.write("\n".join([f"{t}  —  {s:.4f}" for t, s in jd_terms_scores]) or "—")
+            st.markdown("**TF-IDF top terms — JD**")
+            jd_terms_scores = top_terms(jd_text_n, n=tfidf_topn)
+            st.write("\n".join([f"{t}  —  {s:.4f}" for t, s in jd_terms_scores]) or "—")
+            st.markdown("---")
 
         results = []
         tailored_packages = []  # (filename, bytes, mime)
@@ -448,11 +455,12 @@ if run:
 
                 # Debug: show parsed text preview
                 if preview_text:
-                    with st.expander(f"Parsed text preview — {f.name}"):
-                        st.caption(f"First ~1200 chars (word count: {len(resume_text.split())})")
-                        st.code((resume_text[:1200] + "…") if len(resume_text) > 1200 else (resume_text or "—"))
+                    st.markdown(f"**Parsed text preview — {f.name}**")
+                    st.caption(f"First ~1200 chars (word count: {len(resume_text.split())})")
+                    st.code((resume_text[:1200] + "…") if len(resume_text) > 1200 else (resume_text or "—"))
                     if len(resume_text.split()) < 30:
                         st.warning(f"{f.name}: PDF looks scanned or has minimal extractable text. Try DOCX/TXT or enable OCR (local only).")
+                    st.markdown("---")
 
                 # BEFORE
                 sim_before = score_similarity(jd_text_n, resume_text)
@@ -508,6 +516,8 @@ if run:
                     "ats_after": ats_after,
                     "tailored": tailored_text is not None,
                     "tailored_preview": (tailored_text[:1200] + "…") if (tailored_text and len(tailored_text) > 1200) else tailored_text,
+                    "full_text": resume_text,                   # full original text
+                    "tailored_full_text": tailored_text or None,# full tailored text
                     "diff": diff_text
                 })
                 time.sleep(0.05)
@@ -515,30 +525,43 @@ if run:
         st.success("Done!")
         st.markdown("### Results (Before → After)")
 
+        # sort by post-tailor similarity
         results.sort(key=lambda x: x["similarity_after"], reverse=True)
 
         for i, r in enumerate(results, start=1):
-            title = f"{i}. {r['file_name']} — Match: {r['similarity_before']*100:.1f}% → {r['similarity_after']*100:.1f}% | ATS: {r['ats_before']}/100 → {r['ats_after']}/100"
+            title = (
+                f"{i}. {r['file_name']} — "
+                f"Match: {r['similarity_before']*100:.1f}% → {r['similarity_after']*100:.1f}% | "
+                f"ATS: {r['ats_before']}/100 → {r['ats_after']}/100"
+            )
+
+            # OUTER expander only (no nested expanders inside)
             with st.expander(title):
                 st.write("**Tailoring applied:** ", "Yes ✅" if r["tailored"] else "No")
-                if show_tfidf_debug:
-                    with st.expander("TF-IDF top terms — Resume"):
-                        # compute on original resume text
-                        resume_terms_scores = top_terms(r["tailored_preview"] if not r["tailored"] else r["tailored_preview"], n=tfidf_topn)
-                        # Note: for long docs, we already previewed first 1200 chars; here we want full text scores.
-                        # Recompute on the full text by passing resume_text; but we didn't store it to keep memory small.
-                        # If desired, store full text and use it here.
-                        st.caption("Using visible text preview for scoring display.")
-                        st.write("\n".join([f"{t}  —  {s:.4f}" for t, s in resume_terms_scores]) or "—")
+
+                # Tailored preview
                 if r["tailored"]:
                     st.markdown("**Tailored Preview (first ~1,200 chars)**")
                     st.code(r["tailored_preview"] or "—")
-                    if r["diff"]:
-                        with st.expander("Diff (original → tailored)"):
-                            st.code(r["diff"])
+
+                # TF-IDF debug (full text) — plain sections, not nested expanders
+                if show_tfidf_debug:
+                    st.markdown("**TF-IDF top terms — Resume (full text)**")
+                    resume_terms_scores = top_terms(r["full_text"], n=tfidf_topn)
+                    st.write("\n".join([f"{t}  —  {s:.4f}" for t, s in resume_terms_scores]) or "—")
+
+                    if r.get("tailored_full_text"):
+                        st.markdown("**TF-IDF top terms — Tailored (full text)**")
+                        tailored_terms_scores = top_terms(r["tailored_full_text"], n=tfidf_topn)
+                        st.write("\n".join([f"{t}  —  {s:.4f}" for t, s in tailored_terms_scores]) or "—")
+
+                # Diff block (if present) — also not an inner expander
+                if r.get("diff"):
+                    st.markdown("**Diff (original → tailored)**")
+                    st.code(r["diff"])
 
         # Bulk download tailored files
-        if any(r["tailored"] for r in results) and len(tailored_packages) > 0:
+        if any(r["tailored"] for r in results):
             import zipfile
             bio = io.BytesIO()
             with zipfile.ZipFile(bio, "w", zipfile.ZIP_DEFLATED) as z:
@@ -567,5 +590,6 @@ st.caption(
     "PDFs: pdfminer → PyPDF2 → (optional OCR) for robust extraction. "
     "Auto-Tailor is deterministic (no LLM) and injects only real skills/tools. "
     "Blacklist removes brand/company tokens from the JD terms. "
-    "Use Advanced Debug to inspect TF-IDF terms and the unified diff."
+    "Use Advanced Debug to inspect TF-IDF terms and the unified diff. "
+    "If a PDF parses with very few words, enable OCR locally or upload DOCX/TXT for best results."
 )
